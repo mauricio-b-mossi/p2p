@@ -21,7 +21,7 @@ After handshake we proceede with the actual message.
 ## Actual message
 ```
              -------------------------------------------------------
-            | 4 byte message length | 1 byte **message type ** | payload |
+            | 4 byte message length | 1 byte message type | payload |
              -------------------------------------------------------
 ```
 Thus, the payload can be at most 2^{32} - 2.
@@ -98,24 +98,29 @@ There are two configuration files `Common.cgf` and `PeerInfo.cfg`.
 - `PeerInfo.cgf`: Holds the information for peers.
 
 ## Common.cgf: Holds peer properties
+```
 NumberOfPreferredNeighbors 2        # Number of neighbors (int)
 UnchokingInterval 5                 # Interval in seconds
 OptimisticUnchokingInterval 15      # Interval in seconds
 FileName TheFile.dat                # File to be downloaded
 FileSize 10000232                   # File size in bytes
 PieceSize 32768                     # Size of a piece in bytes
+```
 
 When a peer starts, it should `Common.cfg`.
 
 ## PeerInfo.cgf: Illustration of file
-1001 lin114-00.cise.ufl.edu 6008 1      # [id] [host] [port] [has file?]
+1001 lin114-00.cise.ufl.edu 6008 1 
 1002 lin114-01.cise.ufl.edu 6008 0  
 1003 lin114-02.cise.ufl.edu 6008 0  
 1004 lin114-03.cise.ufl.edu 6008 0  
 1005 lin114-04.cise.ufl.edu 6008 0  
 1006 lin114-05.cise.ufl.edu 6008 0 
 
-Each entry follows the format `[id] [host] [port] [has file?]`.
+Each entry follows the format,
+```
+[id] [host] [port] [has file?]
+```
 - Note, we only consider complete files, no partials.
 
 `PeerInfo.cgf` is static, it emulates the BitTorrent tracker. So on start,
