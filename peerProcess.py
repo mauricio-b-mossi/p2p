@@ -248,7 +248,7 @@ if __name__ == "__main__":
             print(f"[{my_peer_id}] Failed to connect to {peer_to_connect.peer_id}: {e}")
             client_socket.close()
 
-    print(f"[{my_pie_id}] Startup complete. Running...")  # Typo fixed
+    print(f"[{my_peer_id}] Startup complete. Running...")
     try:
         while True:
             time.sleep(5)
