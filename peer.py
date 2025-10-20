@@ -1,4 +1,4 @@
-class Peer:
+class Peer:  # could rewrite as @dataclass
     def __init__(self, peer_id, ip_address, port, has_file):
         self.peer_id = int(peer_id)
         self.ip_address = ip_address
