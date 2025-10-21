@@ -143,15 +143,13 @@ def handle_connection(conn_socket, my_peer_id, expected_peer_id, file_manager):
             print(f"[{my_peer_id}] Connection with {other_peer_id} closed.")
 
 
-def start_server(my_peer_id, my_port, file_manager):  # <-- Added file_manager
-    """
-    Starts the server thread to listen for incoming connections.
-    """
+def start_server(my_peer_id, my_port, file_manager):
+
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
-        server_socket.bind(("0.0.0.0", my_port))
+        server_socket.bind(("0.0.0.0", my_port))  # wildcard port
         server_socket.listen(10)
         print(f"[{my_peer_id}] Server listening on port {my_port}...")
 
