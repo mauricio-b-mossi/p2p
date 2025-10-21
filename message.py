@@ -140,6 +140,21 @@ class Message:
         payload = message_body_bytes[1:]
         return Message(msg_type, payload)
 
+    # New payload parsers
+    def parse_have_payload(self):
+        # Payload is 4-byte piece index
+        return struct.unpack("!I", self.payload)[0]
+
+    def parse_request_payload(self):
+        # Payload is 4-byte piece index
+        return struct.unpack("!I", self.payload)[0]
+
+    def parse_piece_payload(self):
+        # Payload is 4-byte index + content
+        piece_index = struct.unpack("!I", self.payload[:4])[0]
+        content = self.payload[4:]
+        return piece_index, content
+
     def __str__(self):
         # A helper for debugging
         type_names = [

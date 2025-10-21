@@ -1,4 +1,5 @@
 import math
+import random
 
 
 # Manager for bitfield as a byte array, helper to work with bitfield.
@@ -79,6 +80,25 @@ class Bitfield:
             if (their_byte & ~our_byte) > 0:
                 return True
         return False
+
+    # See spec, piece from other file is selected randomly.
+    def select_random_piece(self, their_bitfield, requested_pieces):
+        interesting_pieces = []
+        for i in range(self.num_pieces):
+
+            # Check if they have it (1), we don't (0), and we're not
+            # already downloading it.
+            we_have_file = their_bitfield.has_piece(i)
+            they_do_not_have_file = not self.has_piece(i)
+            we_not_dowloading_file = i not in requested_pieces
+
+            if we_have_file and they_do_not_have_file and we_not_dowloading_file:
+                interesting_pieces.append(i)
+
+        if not interesting_pieces:
+            return None
+
+        return random.choice(interesting_pieces)
 
     def __str__(self):
         s = ""

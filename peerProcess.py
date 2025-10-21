@@ -14,10 +14,14 @@ from bitfield import Bitfield
 
 from peer_manager import PeerManager
 
+PEER_CONFIG_FILE = "HelloWorldCommon.cfg"
+# PEER_CONFIG_FILE = "Common.cfg"
+PEER_INFO_FILE = "PeerInfo.cfg"
+
 
 def read_common_config():
     try:
-        config = open("Common.cfg", "r")
+        config = open(PEER_CONFIG_FILE, "r")
         config_dict = {}
         for line in config:
             match = re.findall(r"(\S+)", line)
@@ -26,13 +30,13 @@ def read_common_config():
         config.close()
         return config_dict
     except FileNotFoundError:
-        print("FATAL ERROR: Common.cfg not found.")
+        print(f"FATAL ERROR: {PEER_CONFIG_FILE} not found.")
         sys.exit(1)
 
 
 def read_peer_info_config():
     try:
-        config = open("PeerInfo.cfg", "r")
+        config = open(PEER_INFO_FILE, "r")
         peer_list = []
         for line in config:
             match = re.findall(r"(\S+)", line)
@@ -42,7 +46,7 @@ def read_peer_info_config():
         config.close()
         return peer_list
     except FileNotFoundError:
-        print("FATAL ERROR: PeerInfo.cfg not found.")
+        print(f"FATAL ERROR: {PEER_INFO_FILE} not found.")
         sys.exit(1)
 
 
@@ -70,6 +74,9 @@ class ConnectionHandler(threading.Thread):
 
         self.start_time = time.time()
         self.bytes_downloaded = 0
+
+        self.requested_pieces = set()  # just to ensure we dont request
+        # same piece multiple times
 
     def get_download_rate(self):
         duration = time.time() - self.start_time
@@ -136,7 +143,7 @@ class ConnectionHandler(threading.Thread):
                     Message.create_not_interested_message().to_bytes()
                 )
 
-            # --- MAIN LOOP ---
+            # New main loop
             while True:
                 msg = Message.read_from_socket(self.conn_socket)
                 if msg is None:
@@ -145,8 +152,20 @@ class ConnectionHandler(threading.Thread):
                     )
                     break
 
-                # Handle message
+                # --- Handle the message ---
                 self.handle_message(msg)
+
+            # --- MAIN LOOP ---
+            # while True:
+            #     msg = Message.read_from_socket(self.conn_socket)
+            #     if msg is None:
+            #         print(
+            #             f"[{self.my_peer_id}] Peer {self.other_peer_id} closed connection."
+            #         )
+            #         break
+
+            #     # Handle message
+            #     self.handle_message(msg)
 
         # Error handling courtesy of GPT
         except (IOError, socket.error) as e:
@@ -187,15 +206,62 @@ class ConnectionHandler(threading.Thread):
             piece_index = struct.unpack("!I", msg.payload)[0]
             log_receive_have(self.my_peer_id, self.other_peer_id, piece_index)
             self.their_bitfield.set_piece(piece_index)
+
             # TODO: Check if we are now interested
+            # IMPLEMENTED BUT LEAVE MARKED IN CASE OF ERROR
+            if not self.am_interested_in_them:
+                if self.file_manager.check_interest(self.their_bitfield):
+                    self.am_interested_in_them = True
+                    self.send_interested()
 
+        # TODO: Implement this
+        # JUST IMPLEMENTED LEAVE
         elif msg.msg_type == Message.REQUEST:
-            # TODO: Implement this
-            pass
+            piece_index = msg.parse_request_payload()
+            print(
+                f"[{self.my_peer_id}] Received REQUEST for {piece_index} from {self.other_peer_id}."
+            )
 
+            # Send the piece if we're not choking them
+            if not self.am_choking_them:
+                self.send_piece_message(piece_index)
+            else:
+                print(
+                    f"[{self.my_peer_id}] Ignoring REQUEST from {self.other_peer_id} (choked)."
+                )
+
+        # TODO: Implement this
+        # JUST IMPLEMENTED LEAVE
         elif msg.msg_type == Message.PIECE:
-            # TODO: Implement this
-            pass
+            piece_index, content = msg.parse_piece_payload()
+            print(
+                f"[{self.my_peer_id}] Received PIECE {piece_index} from {self.other_peer_id}."
+            )
+
+            # rm from requested list
+            if piece_index in self.requested_pieces:
+                self.requested_pieces.remove(piece_index)
+
+            # write data to file and log
+            if self.file_manager.write_piece(piece_index, content):
+                log_download_piece(
+                    self.my_peer_id,
+                    self.other_peer_id,
+                    piece_index,
+                    self.file_manager.num_pieces_have,
+                )
+
+                self.peer_manager.broadcast_have(piece_index)
+
+                # check to verify if donwload complete
+                if self.file_manager.num_pieces_have == self.file_manager.num_pieces:
+                    log_download_complete(self.my_peer_id)
+
+                self.send_request_message()
+            else:
+                print(
+                    f"[{self.my_peer_id}] ERROR: Failed to write piece {piece_index}."
+                )
 
     def send_choke(self):
         self.conn_socket.sendall(Message.create_choke_message().to_bytes())
@@ -204,6 +270,56 @@ class ConnectionHandler(threading.Thread):
     def send_unchoke(self):
         self.conn_socket.sendall(Message.create_unchoke_message().to_bytes())
         self.am_choking_them = False
+
+    def send_request_message(self):
+        if self.they_are_choking_me:
+            return  # cannot request if choked
+
+        # select random piece if not requesting
+        piece_index = self.file_manager.bitfield.select_random_piece(
+            self.their_bitfield, self.requested_pieces
+        )
+
+        if piece_index is not None:
+            print(
+                f"[{self.my_peer_id}] Requesting piece {piece_index} from {self.other_peer_id}."
+            )
+            self.requested_pieces.add(piece_index)
+            self.conn_socket.sendall(
+                Message.create_request_message(piece_index).to_bytes()
+            )
+        else:
+            print(
+                f"[{self.my_peer_id}] No pieces to request from {self.other_peer_id}."
+            )
+            # TODO: We might need to send NOT_INTERESTED here if there's nothing left
+
+    def send_piece_message(self, piece_index):
+        """
+        Reads a piece from the file and sends it.
+        """
+        content = self.file_manager.read_piece(piece_index)
+        if content:
+            print(
+                f"[{self.my_peer_id}] Sending PIECE {piece_index} to {self.other_peer_id}."
+            )
+            self.conn_socket.sendall(
+                Message.create_piece_message(piece_index, content).to_bytes()
+            )
+
+    def send_choke(self):
+        self.conn_socket.sendall(Message.create_choke_message().to_bytes())
+        self.am_choking_them = True
+
+    def send_unchoke(self):
+        self.conn_socket.sendall(Message.create_unchoke_message().to_bytes())
+        self.am_choking_them = False
+
+    def send_have(self, piece_index):
+        self.conn_socket.sendall(Message.create_have_message(piece_index).to_bytes())
+
+    def send_interested(self):
+        self.conn_socket.sendall(Message.create_interested_message().to_bytes())
 
 
 # Changed func by using new ConnectionHandler
