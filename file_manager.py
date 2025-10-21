@@ -93,3 +93,7 @@ class FileManager:
             except IOError as e:
                 print(f"[{self.peer_id}] ERROR reading piece {piece_index}: {e}")
                 return None
+    
+    # convenicene method to check if complete
+    def is_complete(self):
+        return self.num_pieces_have == self.num_pieces

@@ -5,19 +5,31 @@ from logger import log_preferred_neighbors, log_optimistic_neighbor
 
 
 class PeerManager:
-    def __init__(self, my_peer_id, file_manager, common_config):
+    # Added all_peer_info param to track termination state
+    def __init__(self, my_peer_id, all_peers_info, file_manager, common_config):
         self.my_peer_id = my_peer_id
         self.file_manager = file_manager
+
         self.k = int(common_config["NumberOfPreferredNeighbors"])
         self.p_interval = int(common_config["UnchokingInterval"])
         self.m_interval = int(common_config["OptimisticUnchokingInterval"])
+
         self.connections = {}
         self.preferred_neighbors = set()
         self.optimistic_neighbor = None
+
+        self.all_peers_info = all_peers_info
+
+        # store all bitfields
+        self.peer_bitfields = {
+            p.peer_id: file_manager.bitfield if p.peer_id == my_peer_id else None
+            for p in all_peers_info
+        }
+        self.shutdown_event = threading.Event()
+
         self.lock = threading.Lock()
-        print(
-            f"[{my_peer_id}] PeerManager initialized (k={self.k}, p={self.p_interval}, m={self.m_interval})."
-        )
+
+        print(f"[{my_peer_id}] PeerManager initialized.")
 
     def add_connection(self, peer_id, handler_thread):
         with self.lock:
@@ -106,3 +118,33 @@ class PeerManager:
         with self.lock:
             for peer_id, handler in self.connections.items():
                 handler.send_have(piece_index)
+
+
+    # Called by a ConnectionHandler when it receives a
+    # BITFIELD or HAVE message.
+    def update_peer_bitfield(self, peer_id, bitfield):
+        with self.lock:
+            self.peer_bitfields[peer_id] = bitfield
+            self._check_for_termination()
+
+
+    # Checks if all peers (from the original PeerInfo.cfg)
+    # have the complete file. If so, triggers shutdown.
+    def _check_for_termination(self):
+        num_pieces = self.file_manager.num_pieces
+
+        for peer_info in self.all_peers_info:
+            peer_id = peer_info.peer_id
+            bfield = self.peer_bitfields.get(peer_id)
+
+            if bfield is None: # if we dont have bietfield we aint done
+                return
+
+            # double check each piece is present
+            for i in range(num_pieces):
+                if not bfield.has_piece(i):
+                    return  # found a peer that is not donw
+
+        # this means it has passed all checks.
+        print(f"[{self.my_peer_id}] All peers have completed the download!")
+        self.shutdown_event.set()
