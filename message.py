@@ -47,6 +47,9 @@ class Handshake:
 # Represnets the actual message after the initial handshake.
 #
 # - Handles creation and parsing of 5 byte header.
+# Provides loads of factory methods, to create message
+# has format:
+# -     create-<message-type>(args).
 class Message:
 
     CHOKE = 0
@@ -75,6 +78,68 @@ class Message:
     def create_bitfield_message(bitfield):
         return Message(Message.BITFIELD, bitfield.to_bytes())
 
+    @staticmethod
+    def create_choke_message():
+        return Message(Message.CHOKE)
+
+    @staticmethod
+    def create_unchoke_message():
+        return Message(Message.UNCHOKE)
+
+    @staticmethod
+    def create_interested_message():
+        return Message(Message.INTERESTED)
+
+    @staticmethod
+    def create_not_interested_message():
+        return Message(Message.NOT_INTERESTED)
+
+    @staticmethod
+    def create_have_message(piece_index):
+        # Payload is a 4-byte piece index
+        payload = struct.pack("!I", piece_index)
+        return Message(Message.HAVE, payload)
+
+    @staticmethod
+    def create_bitfield_message(bitfield):
+        return Message(Message.BITFIELD, bitfield.to_bytes())
+
+    @staticmethod
+    def create_request_message(piece_index):
+        # Payload is a 4-byte piece index
+        payload = struct.pack("!I", piece_index)
+        return Message(Message.REQUEST, payload)
+
+    @staticmethod
+    def create_piece_message(piece_index, content):
+        # Payload is 4-byte index + content
+        payload_header = struct.pack("!I", piece_index)
+        return Message(Message.PIECE, payload_header + content)
+
+    # --- (read_from_socket and __str__ are unchanged) ---
+    @staticmethod
+    def read_from_socket(conn_socket):
+        header_len_bytes = conn_socket.recv(4)
+        if not header_len_bytes:
+            return None
+        if len(header_len_bytes) < 4:
+            raise IOError(
+                "Connection closed unexpectedly while reading message length."
+            )
+        msg_length = struct.unpack("!I", header_len_bytes)[0]
+        message_body_bytes = b""
+        bytes_to_read = msg_length
+        while len(message_body_bytes) < bytes_to_read:
+            chunk = conn_socket.recv(bytes_to_read - len(message_body_bytes))
+            if not chunk:
+                raise IOError(
+                    "Connection closed unexpectedly while reading message body."
+                )
+            message_body_bytes += chunk
+        msg_type = message_body_bytes[0]
+        payload = message_body_bytes[1:]
+        return Message(msg_type, payload)
+
     def __str__(self):
         # A helper for debugging
         type_names = [
@@ -87,4 +152,6 @@ class Message:
             "REQUEST",
             "PIECE",
         ]
+        if self.msg_type > len(type_names) - 1:
+            return f"[Msg: UNKNOWN({self.msg_type}), Len: {self.msg_length}]"
         return f"[Msg: {type_names[self.msg_type]}, Len: {self.msg_length}]"

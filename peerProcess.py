@@ -1,21 +1,23 @@
+#
+# This file is peerProcess.py
+#
 import sys
 import re
 import socket
 import threading
 import time
-
 import struct
+import queue
 
-# --- Local Imports ----
 from peer import Peer
-from logger import setup_logging, log_tcp_connection_to, log_tcp_connection_from
+from logger import *  # Import all logging functions
 from message import Handshake, Message
 from file_manager import FileManager
 from bitfield import Bitfield
+from peer_manager import PeerManager  # <-- NEW IMPORT
 
-# --- Config Parsing ----
 
-
+# --- Config parsing (unchanged) ---
 def read_common_config():
     try:
         config = open("Common.cfg", "r")
@@ -47,109 +49,192 @@ def read_peer_info_config():
         sys.exit(1)
 
 
-# --- Manages the peer
+# --- End of config parsing ---
 
 
-def handle_connection(conn_socket, my_peer_id, expected_peer_id, file_manager):
+class ConnectionHandler(threading.Thread):
     """
-    This function is run in a thread for EVERY connection.
-    - file_manager: Our peer's file manager object.
+    Replaces the old 'handle_connection' function.
+    This is a long-running thread that manages a *single*
+    connection to another peer.
     """
-    # --- handshake ----
-    other_peer_id = None
-    try:
-        print(f"[{my_peer_id}] Sending handshake...")
-        my_handshake = Handshake(my_peer_id)
-        conn_socket.sendall(my_handshake.to_bytes())
 
-        received_handshake_bytes = conn_socket.recv(32)
-        if not received_handshake_bytes:
-            raise Exception("Connection closed before handshake.")
+    def __init__(
+        self, conn_socket, my_peer_id, peer_manager, file_manager, expected_peer_id=None
+    ):
+        super().__init__(daemon=True)
+        self.conn_socket = conn_socket
+        self.my_peer_id = my_peer_id
+        self.peer_manager = peer_manager
+        self.file_manager = file_manager
 
-        received_handshake = Handshake.from_bytes(received_handshake_bytes)
-        other_peer_id = received_handshake.peer_id
+        self.expected_peer_id = expected_peer_id
+        self.other_peer_id = None
+        self.their_bitfield = Bitfield(file_manager.num_pieces)
 
-        if expected_peer_id is not None and other_peer_id != expected_peer_id:
-            raise Exception(
-                f"Expected peer {expected_peer_id} but got {other_peer_id}."
+        # --- State variables ---
+        self.am_choking_them = True  # We start by choking everyone
+        self.am_interested_in_them = False
+        self.they_are_choking_me = True  # Assume they are choking us
+        self.is_interested_in_me = False
+
+        self.start_time = time.time()
+        self.bytes_downloaded = 0
+
+    def get_download_rate(self):
+        """
+        Calculates the download rate from this peer.
+        Called by PeerManager.
+        """
+        duration = time.time() - self.start_time
+        if duration == 0:
+            return 0
+        rate = self.bytes_downloaded / duration
+
+        # Reset for the next interval
+        self.bytes_downloaded = 0
+        self.start_time = time.time()
+        return rate
+
+    def run(self):
+        """
+        The main logic for this connection thread.
+        """
+        try:
+            # 1. --- HANDSHAKE ---
+            my_handshake = Handshake(self.my_peer_id)
+            self.conn_socket.sendall(my_handshake.to_bytes())
+
+            received_bytes = self.conn_socket.recv(32)
+            if not received_bytes:
+                raise Exception("Connection closed before handshake.")
+
+            received_handshake = Handshake.from_bytes(received_bytes)
+            self.other_peer_id = received_handshake.peer_id
+
+            if (
+                self.expected_peer_id is not None
+                and self.other_peer_id != self.expected_peer_id
+            ):
+                raise Exception(
+                    f"Expected peer {self.expected_peer_id} but got {self.other_peer_id}."
+                )
+
+            print(
+                f"[{self.my_peer_id}] Handshake successful with {self.other_peer_id}."
             )
 
-        print(f"[{my_peer_id}] Handshake successful with peer {other_peer_id}.")
+            # 2. --- REGISTER WITH PEERMANAGER ---
+            # This must happen *after* we know their ID
+            self.peer_manager.add_connection(self.other_peer_id, self)
 
-        # --- log connection ---
+            # 3. --- LOG THE CONNECTION ---
+            if self.expected_peer_id is not None:
+                log_tcp_connection_to(self.my_peer_id, self.other_peer_id)
+            else:
+                log_tcp_connection_from(self.my_peer_id, self.other_peer_id)
 
-        if expected_peer_id is not None:
-            log_tcp_connection_to(my_peer_id, other_peer_id)
-        else:
-            log_tcp_connection_from(my_peer_id, other_peer_id)
+            # 4. --- BITFIELD EXCHANGE ---
+            bitfield_msg = Message.create_bitfield_message(self.file_manager.bitfield)
+            self.conn_socket.sendall(bitfield_msg.to_bytes())
 
-        # --- bitfield exchange ---
+            bitfield_msg = Message.read_from_socket(self.conn_socket)
+            if bitfield_msg is None or bitfield_msg.msg_type != Message.BITFIELD:
+                raise Exception("Did not receive bitfield after handshake.")
 
-        # sending our bitfield
-        print(f"[{my_peer_id}] Sending bitfield to {other_peer_id}...")
-        bitfield_msg = Message.create_bitfield_message(file_manager.bitfield)
-        conn_socket.sendall(bitfield_msg.to_bytes())
+            self.their_bitfield = Bitfield.from_bytes(
+                self.file_manager.num_pieces, bitfield_msg.payload
+            )
+            print(f"[{self.my_peer_id}] Received bitfield from {self.other_peer_id}.")
 
-        # receiving their bitfield
+            # 5. --- SEND INTERESTED / NOT INTERESTED ---
+            if self.file_manager.check_interest(self.their_bitfield):
+                self.am_interested_in_them = True
+                self.conn_socket.sendall(Message.create_interested_message().to_bytes())
+            else:
+                self.am_interested_in_them = False
+                self.conn_socket.sendall(
+                    Message.create_not_interested_message().to_bytes()
+                )
 
-        # Reading according to protocol ref pag 7.
-        # First, read the 5-byte message header (4-byte len + 1-byte type)
-        header_bytes = conn_socket.recv(5)
-        if not header_bytes:
-            raise Exception(f"Connection with {other_peer_id} closed before bitfield.")
+            # 6. --- MAIN MESSAGE LOOP ---
+            while True:
+                msg = Message.read_from_socket(self.conn_socket)
+                if msg is None:
+                    print(
+                        f"[{self.my_peer_id}] Peer {self.other_peer_id} closed connection."
+                    )
+                    break
 
-        msg_length, msg_type = struct.unpack("!IB", header_bytes)
+                # --- Handle the message ---
+                self.handle_message(msg)
 
-        payload_length = msg_length - 1
+        except (IOError, socket.error) as e:
+            print(f"[{self.my_peer_id}] Socket error with {self.other_peer_id}: {e}")
+        except Exception as e:
+            print(
+                f"[{self.my_peer_id}] Error in connection with {self.other_peer_id}: {e}"
+            )
+        finally:
+            self.conn_socket.close()
+            # Tell the PeerManager we are dead
+            self.peer_manager.remove_connection(self.other_peer_id)
+            print(f"[{self.my_peer_id}] Connection with {self.other_peer_id} closed.")
 
-        # Read the rest of the message
-        payload_bytes = conn_socket.recv(payload_length)
-        if not payload_bytes:
-            raise Exception(f"Connection with {other_peer_id} closed during bitfield.")
+    def handle_message(self, msg):
+        """
+        Dispatcher for all incoming messages.
+        """
+        print(f"[{self.my_peer_id}] Received {msg} from {self.other_peer_id}.")
 
-        if msg_type != Message.BITFIELD:
-            # The spec says bitfield is always the first message (ref pag 2)
-            raise Exception(f"Expected BITFIELD (5), but got {msg_type}.")
+        if msg.msg_type == Message.CHOKE:
+            log_choking(self.my_peer_id, self.other_peer_id)
+            self.they_are_choking_me = True
 
-        # parse their bitfield
-        their_bitfield = Bitfield.from_bytes(file_manager.num_pieces, payload_bytes)
-        print(
-            f"[{my_peer_id}] Received bitfield from {other_peer_id}: {their_bitfield}"
-        )
+        elif msg.msg_type == Message.UNCHOKE:
+            log_unchoking(self.my_peer_id, self.other_peer_id)
+            self.they_are_choking_me = False
+            # TODO: Pick a piece and send a REQUEST
 
-        # TODO: Store this 'their_bitfield' object, associating it
-        # with this specific 'other_peer_id' for later use.
+        elif msg.msg_type == Message.INTERESTED:
+            log_receive_interested(self.my_peer_id, self.other_peer_id)
+            self.is_interested_in_me = True
 
-        # Send Interested or Not Interested
-        # TODO: Compare 'their_bitfield' with 'file_manager.bitfield'
-        # and send an 'INTERESTED' or 'NOT_INTERESTED' message.
-        print(f"[{my_peer_id}] Sending NOT_INTERESTED (for now) to {other_peer_id}.")
-        not_interested_msg = Message(Message.NOT_INTERESTED)
-        conn_socket.sendall(not_interested_msg.to_bytes())
+        elif msg.msg_type == Message.NOT_INTERESTED:
+            log_receive_not_interested(self.my_peer_id, self.other_peer_id)
+            self.is_interested_in_me = False
 
-        # TODO: Implement message loop.
-        while True:
-            # before implementing loop, just keep the connection alive
-            time.sleep(1)
+        elif msg.msg_type == Message.HAVE:
+            piece_index = struct.unpack("!I", msg.payload)[0]
+            log_receive_have(self.my_peer_id, self.other_peer_id, piece_index)
+            self.their_bitfield.set_piece(piece_index)
+            # TODO: Check if we are now interested
 
-    except Exception as e:
-        if other_peer_id:
-            print(f"[{my_peer_id}] Error in connection with {other_peer_id}: {e}")
-        else:
-            print(f"[{my_peer_id}] Connection failed: {e}")
-    finally:
-        conn_socket.close()
-        if other_peer_id:
-            print(f"[{my_peer_id}] Connection with {other_peer_id} closed.")
+        elif msg.msg_type == Message.REQUEST:
+            # TODO: Implement this
+            pass
+
+        elif msg.msg_type == Message.PIECE:
+            # TODO: Implement this
+            pass
+
+    # --- Methods to send messages ---
+    def send_choke(self):
+        self.conn_socket.sendall(Message.create_choke_message().to_bytes())
+        self.am_choking_them = True
+
+    def send_unchoke(self):
+        self.conn_socket.sendall(Message.create_unchoke_message().to_bytes())
+        self.am_choking_them = False
 
 
-def start_server(my_peer_id, my_port, file_manager):
-
+# --- Server Function (Now simplified) ---
+def start_server(my_peer_id, my_port, peer_manager, file_manager):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     try:
-        server_socket.bind(("0.0.0.0", my_port))  # wildcard port
+        server_socket.bind(("0.0.0.0", my_port))
         server_socket.listen(10)
         print(f"[{my_peer_id}] Server listening on port {my_port}...")
 
@@ -157,13 +242,11 @@ def start_server(my_peer_id, my_port, file_manager):
             conn, addr = server_socket.accept()
             print(f"[{my_peer_id}] Accepted connection from {addr}")
 
-            thread = threading.Thread(
-                target=handle_connection,
-                # Pass the file_manager to the handler
-                args=(conn, my_peer_id, None, file_manager),
-                daemon=True,
+            # Create and start the new ConnectionHandler thread
+            handler = ConnectionHandler(
+                conn, my_peer_id, peer_manager, file_manager, None
             )
-            thread.start()
+            handler.start()
 
     except Exception as e:
         print(f"[{my_peer_id}] SERVER ERROR: {e}")
@@ -171,6 +254,7 @@ def start_server(my_peer_id, my_port, file_manager):
         server_socket.close()
 
 
+# --- __main__ (Now simplified) ---
 if __name__ == "__main__":
 
     # 1. Parse args and configs
@@ -180,7 +264,7 @@ if __name__ == "__main__":
     try:
         my_peer_id = int(sys.argv[1])
     except ValueError:
-        print("FATAL ERROR: Peer ID must be an integer.")
+        print(f"FATAL ERROR: Peer ID must be an integer.")
         sys.exit(1)
 
     print(f"[{my_peer_id}] Starting...")
@@ -205,50 +289,49 @@ if __name__ == "__main__":
     setup_logging(my_peer_id)
     print(f"[{my_peer_id}] Logging to log_peer_{my_peer_id}.log")
 
-    # 4. Initialize File Manager
+    # 4. Initialize Core Components
     file_manager = FileManager(my_peer_info, common_config)
+    peer_manager = PeerManager(my_peer_id, file_manager, common_config)
 
     # 5. Start the Server Thread
     server_thread = threading.Thread(
         target=start_server,
-        # Pass the file_manager to the server
-        args=(my_peer_info.peer_id, my_peer_info.port, file_manager),
+        args=(my_peer_id, my_peer_info.port, peer_manager, file_manager),
         daemon=True,
     )
     server_thread.start()
 
     # 6. Start Client Connections
-    print(
-        f"[{my_peer_id}] Attempting to connect to {len(peers_to_connect_to)} earlier peers..."
-    )
     for peer_to_connect in peers_to_connect_to:
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_host = "127.0.0.1"
+            target_host = "127.0.0.1"  # For local testing
 
-            print(
-                f"[{my_peer_id}] Connecting to {peer_to_connect.peer_id} at {target_host}:{peer_to_connect.port}..."
-            )
+            print(f"[{my_peer_id}] Connecting to {peer_to_connect.peer_id}...")
             client_socket.connect((target_host, peer_to_connect.port))
-            print(
-                f"[{my_peer_id}] Successfully connected to {peer_to_connect.peer_id}."
-            )
 
-            thread = threading.Thread(
-                target=handle_connection,
-                # Pass the file_manager to the handler
-                args=(client_socket, my_peer_id, peer_to_connect.peer_id, file_manager),
-                daemon=True,
+            # Create and start the new ConnectionHandler thread
+            handler = ConnectionHandler(
+                client_socket,
+                my_peer_id,
+                peer_manager,
+                file_manager,
+                peer_to_connect.peer_id,
             )
-            thread.start()
+            handler.start()
 
         except Exception as e:
             print(f"[{my_peer_id}] Failed to connect to {peer_to_connect.peer_id}: {e}")
             client_socket.close()
 
+    # 7. --- START THE MANAGER'S TIMERS ---
+    print(f"[{my_peer_id}] Starting PeerManager timers...")
+    peer_manager.start_timers()
+
     print(f"[{my_peer_id}] Startup complete. Running...")
     try:
         while True:
+            # TODO: Add termination logic
             time.sleep(5)
     except KeyboardInterrupt:
         print(f"\n[{my_peer_id}] Shutting down.")
