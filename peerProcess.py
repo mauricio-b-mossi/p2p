@@ -13,11 +13,25 @@ from file_manager import FileManager
 from bitfield import Bitfield
 from peer_manager import PeerManager
 
-#COMMON_PEER_FILE = "Common.cfg"
-#PEER_INFO_FILE = "PeerInfo.cfg"
 
-COMMON_PEER_FILE = "HelloWorldCommon.cfg"
-PEER_INFO_FILE = "HelloWorldPeerInfo.cfg"
+# --- CHANGE PARAMS ---
+# - LOCAL_TESTING is a flag that indicates if we are testing locally. If so it disregards IP's from PEER_INFO_FILE
+#       and uses the loopback address
+#
+# Also, you can set LOCAL_TESTING_PEER_FILE and LOCAL_TESTING_PEER_INFO_FILE, which will be used depending
+# on the LOCAL_TESTING flag.
+
+LOCAL_TESTING = True
+
+LOCAL_TESTING_PEER_FILE = "HelloWorldCommon.cfg"
+LOCAL_TESTING_PEER_INFO_FILE = "HelloWorldPeerInfo.cfg"
+
+PROD_PEER_FILE = "Common.cfg"
+PROD_PEER_INFO_FILE = "PeerInfo.cfg"
+
+# --- DO NOT CHANGE ---
+COMMON_PEER_FILE = LOCAL_TESTING_PEER_FILE if LOCAL_TESTING else PROD_PEER_FILE
+PEER_INFO_FILE = LOCAL_TESTING_PEER_INFO_FILE if LOCAL_TESTING else PROD_PEER_INFO_FILE
 
 
 def read_common_config():
@@ -344,7 +358,9 @@ if __name__ == "__main__":
     for peer_to_connect in peers_to_connect_to:
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_host = "127.0.0.1"  # For local testing
+
+            target_host = "127.0.0.1" if LOCAL_TESTING else peer_to_connect.ip_address
+
             print(f"[{my_peer_id}] Connecting to {peer_to_connect.peer_id}...")
             client_socket.connect((target_host, peer_to_connect.port))
             handler = ConnectionHandler(
