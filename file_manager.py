@@ -44,3 +44,6 @@ class FileManager:
             f"[{self.peer_id}] Piece Size: {self.piece_size}, Num Pieces: {self.num_pieces}"
         )
         print(f"[{self.peer_id}] My Bitfield: {self.bitfield}")
+        
+    def check_interest(self, their_bitfield):
+        return self.bitfield.has_interesting_pieces(their_bitfield)

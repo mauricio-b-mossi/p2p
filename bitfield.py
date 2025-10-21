@@ -66,6 +66,20 @@ class Bitfield:
         bitfield.field = bytearray(byte_data)
         return bitfield
 
+    def has_interesting_pieces(self, their_bitfield):
+        # We need to check byte by byte (GPT clutch)
+        for i in range(len(self.field)):
+            # Use bitwise XOR (^) to find different bits,
+            # then AND (&) with their bits.
+            # This finds bits that are 1 in their_field and 0 in self.field
+            our_byte = self.field[i]
+            their_byte = their_bitfield.field[i]
+
+            # (their_byte & ~our_byte) finds bits they have (1) and we don't (0)
+            if (their_byte & ~our_byte) > 0:
+                return True
+        return False
+
     def __str__(self):
         s = ""
         for byte in self.field:
